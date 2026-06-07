@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from uiprotect import ProtectApiClient
+from uiprotect.api import RTSPSStreams
 from uiprotect.data import (
     NVR,
     AiPort,
@@ -29,6 +30,7 @@ from uiprotect.data import (
 )
 from uiprotect.websocket import WebsocketState
 
+from homeassistant.components.unifiprotect.camera import _QUALITY_BY_CHANNEL_ID
 from homeassistant.components.unifiprotect.const import DOMAIN
 from homeassistant.components.unifiprotect.utils import _async_unifi_mac_from_hass
 from homeassistant.const import (
@@ -80,8 +82,14 @@ def mock_nvr():
     NVR.model_config["validate_assignment"] = True
 
 
+@pytest.fixture(name="ufp_options")
+def mock_ufp_options() -> dict[str, Any]:
+    """Options for the mock config entry (default: public stream path)."""
+    return {}
+
+
 @pytest.fixture(name="ufp_config_entry")
-def mock_ufp_config_entry():
+def mock_ufp_config_entry(ufp_options: dict[str, Any]):
     """Mock the unifiprotect config entry."""
 
     return MockConfigEntry(
@@ -95,6 +103,7 @@ def mock_ufp_config_entry():
             CONF_PORT: DEFAULT_PORT,
             CONF_VERIFY_SSL: DEFAULT_VERIFY_SSL,
         },
+        options=ufp_options,
         version=2,
         unique_id="A1E00C826924",
     )
@@ -154,6 +163,25 @@ def mock_ufp_client(bootstrap: Bootstrap):
     client.update = AsyncMock(return_value=bootstrap)
     client.async_disconnect_ws = AsyncMock()
     client.has_public_bootstrap = False
+
+    async def get_camera_rtsps_streams(
+        camera_id: str, *args: Any, **kwargs: Any
+    ) -> RTSPSStreams | None:
+        """Build public-API RTSPS streams from the camera's RTSP-enabled channels."""
+        camera = client.bootstrap.cameras.get(camera_id)
+        if camera is None:
+            return None
+        # Mirror the real device: only RTSP-enabled channels have an active URL.
+        # Use the private rtsps_url so stripping SRTP yields rtsps_no_srtp_url.
+        urls = {
+            _QUALITY_BY_CHANNEL_ID[channel.id]: channel.rtsps_url
+            for channel in camera.channels
+            if channel.is_rtsp_enabled and channel.id in _QUALITY_BY_CHANNEL_ID
+        }
+        return RTSPSStreams(**urls)
+
+    client.get_camera_rtsps_streams = AsyncMock(side_effect=get_camera_rtsps_streams)
+    client.create_camera_rtsps_streams = AsyncMock(return_value=None)
     return client
 
 

@@ -785,13 +785,15 @@
           "all_updates": "Realtime metrics (WARNING: Greatly increases CPU usage)",
           "disable_rtsp": "Disable the RTSP stream",
           "max_media": "Max number of event to load for Media Browser (increases RAM usage)",
-          "override_connection_host": "Override connection host"
+          "override_connection_host": "Override connection host",
+          "use_public_api_streams": "Use the public API for camera streams"
         },
         "data_description": {
           "all_updates": "Enable realtime metrics updates. Only use if you have enabled diagnostic sensors and want them updated in realtime.",
           "disable_rtsp": "Disable the RTSP stream for all cameras. Use this if you don't need live video feeds.",
           "max_media": "Maximum number of events to load in the Media Browser. Higher values use more RAM.",
-          "override_connection_host": "Override the connection host for the UniFi Protect device."
+          "override_connection_host": "Override the connection host for the UniFi Protect device.",
+          "use_public_api_streams": "Source camera live streams from the official UniFi Protect public API. Turn this off to fall back to the legacy private RTSP stream handling."
         },
         "description": "Realtime metrics option should only be enabled if you have enabled the diagnostics sensors and want them updated in realtime. If not enabled, they will only update once every 15 minutes.",
         "title": "UniFi Protect options"

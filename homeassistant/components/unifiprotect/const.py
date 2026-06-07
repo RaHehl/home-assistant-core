@@ -27,6 +27,9 @@ CONF_ALL_UPDATES = "all_updates"
 CONF_OVERRIDE_CHOST = "override_connection_host"
 CONF_MAX_MEDIA = "max_media"
 CONF_ALLOW_EA = "allow_ea_channel"
+CONF_USE_PUBLIC_API_STREAMS = "use_public_api_streams"
+
+DEFAULT_USE_PUBLIC_API_STREAMS = True
 
 CONFIG_OPTIONS = [
     CONF_ALL_UPDATES,

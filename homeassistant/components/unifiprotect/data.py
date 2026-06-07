@@ -9,6 +9,7 @@ import logging
 from typing import TYPE_CHECKING, Any, cast
 
 from uiprotect import ProtectApiClient
+from uiprotect.api import RTSPSStreams
 from uiprotect.data import (
     NVR,
     Camera,
@@ -38,7 +39,9 @@ from .const import (
     AUTH_RETRIES,
     CONF_DISABLE_RTSP,
     CONF_MAX_MEDIA,
+    CONF_USE_PUBLIC_API_STREAMS,
     DEFAULT_MAX_MEDIA,
+    DEFAULT_USE_PUBLIC_API_STREAMS,
     DEVICES_THAT_ADOPT,
     DISPATCH_ADD,
     DISPATCH_ADOPT,
@@ -100,11 +103,20 @@ class ProtectData:
         self.channels_signal = _async_dispatch_id(entry, DISPATCH_CHANNELS)
         # PTZ patrol cache: camera_id -> list of patrols
         self.ptz_patrols: dict[str, list[PTZPatrol]] = {}
+        # Public-API RTSPS stream cache: camera_id -> RTSPSStreams
+        self.rtsps_streams: dict[str, RTSPSStreams] = {}
 
     @property
     def disable_stream(self) -> bool:
         """Check if RTSP is disabled."""
         return self._entry.options.get(CONF_DISABLE_RTSP, False)  # type: ignore[no-any-return]
+
+    @property
+    def use_public_api_streams(self) -> bool:
+        """Check if camera streams are sourced from the public API."""
+        return self._entry.options.get(  # type: ignore[no-any-return]
+            CONF_USE_PUBLIC_API_STREAMS, DEFAULT_USE_PUBLIC_API_STREAMS
+        )
 
     @property
     def max_events(self) -> int:
@@ -157,6 +169,30 @@ class ProtectData:
                     camera.display_name,
                 )
                 self.ptz_patrols[camera.id] = []
+
+    async def async_load_rtsps_streams(self) -> None:
+        """Load public-API RTSPS streams for all cameras."""
+        if not self.use_public_api_streams:
+            return
+        await asyncio.gather(
+            *(
+                self.async_load_rtsps_streams_for_camera(camera)
+                for camera in self.get_cameras()
+            )
+        )
+
+    async def async_load_rtsps_streams_for_camera(self, camera: Camera) -> None:
+        """Load the public-API RTSPS streams for a specific camera."""
+        try:
+            streams = await self.api.get_camera_rtsps_streams(camera.id)
+        except ClientError:
+            _LOGGER.debug(
+                "Failed to load RTSPS streams for camera %s",
+                camera.display_name,
+            )
+            return
+        if streams is not None:
+            self.rtsps_streams[camera.id] = streams
 
     @callback
     def async_setup(self) -> None:
@@ -280,10 +316,14 @@ class ProtectData:
     def _async_add_device(self, device: ProtectAdoptableDeviceModel) -> None:
         if device.is_adopted_by_us:
             _LOGGER.debug("Device adopted: %s", device.id)
-            if isinstance(device, Camera) and device.feature_flags.is_ptz:
+            # Cameras may need async data (PTZ patrols, public RTSPS streams)
+            # loaded before their entities are created on adopt.
+            if isinstance(device, Camera) and (
+                device.feature_flags.is_ptz or self.use_public_api_streams
+            ):
                 self._hass.async_create_task(
-                    self._async_adopt_ptz_camera(device),
-                    name="unifiprotect_adopt_ptz_camera",
+                    self._async_adopt_camera(device),
+                    name="unifiprotect_adopt_camera",
                 )
             else:
                 async_dispatcher_send(self._hass, self.adopt_signal, device)
@@ -291,9 +331,11 @@ class ProtectData:
             _LOGGER.debug("New device detected: %s", device.id)
             async_dispatcher_send(self._hass, self.add_signal, device)
 
-    async def _async_adopt_ptz_camera(self, camera: Camera) -> None:
-        """Load PTZ patrol data and dispatch adopt signal for a PTZ camera."""
+    async def _async_adopt_camera(self, camera: Camera) -> None:
+        """Load async camera data and dispatch the adopt signal."""
         await self.async_load_ptz_patrols_for_camera(camera)
+        if self.use_public_api_streams:
+            await self.async_load_rtsps_streams_for_camera(camera)
         async_dispatcher_send(self._hass, self.adopt_signal, camera)
 
     @callback
