@@ -254,10 +254,11 @@ class ProtectCamera(ProtectDeviceEntity, Camera):
         self, width: int | None = None, height: int | None = None
     ) -> bytes | None:
         """Return the Camera Image."""
-        if self.channel.is_package:
-            last_image = await self.device.get_package_snapshot(width, height)
-        else:
-            last_image = await self.device.get_public_api_snapshot()
+        # Both the main and the package snapshot come from the public API; the
+        # package camera is selected with ``package=True`` (``?channel=package``).
+        last_image = await self.device.get_public_api_snapshot(
+            package=self.channel.is_package
+        )
         self._last_image = last_image
         return self._last_image
 
