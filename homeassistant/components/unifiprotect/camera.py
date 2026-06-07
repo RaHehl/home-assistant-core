@@ -101,12 +101,58 @@ def _get_camera_channels(
             ir.async_delete_issue(hass, DOMAIN, f"rtsp_disabled_{camera.id}")
 
 
+def _async_public_camera_entities(
+    hass: HomeAssistant,
+    entry: UFPConfigEntry,
+    data: ProtectData,
+    ufp_device: UFPCamera | None = None,
+) -> list[ProtectDeviceEntity]:
+    """Create camera entities with stream URLs sourced from the public API.
+
+    One secure entity per hardware stream quality (high/medium/low, plus the
+    package camera). RTSPS URLs come from the public API with SRTP stripped for
+    go2rtc; the private per-channel RTSP repair does not apply in this mode.
+    """
+    disable_stream = data.disable_stream
+    entities: list[ProtectDeviceEntity] = []
+    cameras = data.get_cameras() if ufp_device is None else [ufp_device]
+    for camera in cameras:
+        if not camera.channels:
+            if ufp_device is None:
+                # only warn on startup
+                _LOGGER.warning(
+                    "Camera does not have any channels: %s (id: %s)",
+                    camera.display_name,
+                    camera.id,
+                )
+            data.async_add_pending_camera_id(camera.id)
+            continue
+
+        ir.async_delete_issue(hass, DOMAIN, f"rtsp_disabled_{camera.id}")
+        is_default = True
+        for channel in camera.channels:
+            if channel.is_package:
+                # package camera provides snapshots only; 2 FPS streams buffer
+                entities.append(ProtectCamera(data, camera, channel, True, True, True))
+            else:
+                entities.append(
+                    ProtectCamera(
+                        data, camera, channel, is_default, True, disable_stream
+                    )
+                )
+                is_default = False
+    return entities
+
+
 def _async_camera_entities(
     hass: HomeAssistant,
     entry: UFPConfigEntry,
     data: ProtectData,
     ufp_device: UFPCamera | None = None,
 ) -> list[ProtectDeviceEntity]:
+    if data.use_public_api_streams:
+        return _async_public_camera_entities(hass, entry, data, ufp_device)
+
     disable_stream = data.disable_stream
     entities: list[ProtectDeviceEntity] = []
     for camera, channel, is_default in _get_camera_channels(
@@ -169,6 +215,11 @@ async def async_setup_entry(
 _DISABLE_FEATURE = CameraEntityFeature(0)
 _ENABLE_FEATURE = CameraEntityFeature.STREAM
 
+# Public-API RTSPS quality names keyed by the channel id Protect assigns them.
+# These match the ``RTSPSStreams`` attribute names consumed by ``get_stream_url``.
+_QUALITY_BY_CHANNEL_ID = {0: "high", 1: "medium", 2: "low"}
+_PACKAGE_QUALITY = "package"
+
 
 class ProtectCamera(ProtectDeviceEntity, Camera):
     """A Ubiquiti UniFi Protect Camera."""
@@ -194,6 +245,11 @@ class ProtectCamera(ProtectDeviceEntity, Camera):
         self._secure = secure
         self._disable_stream = disable_stream
         self._last_image: bytes | None = None
+        self._quality = (
+            _PACKAGE_QUALITY
+            if channel.is_package
+            else _QUALITY_BY_CHANNEL_ID.get(channel.id)
+        )
         super().__init__(data, camera)
         device = self.device
 
@@ -214,14 +270,27 @@ class ProtectCamera(ProtectDeviceEntity, Camera):
 
     @callback
     def _async_set_stream_source(self) -> None:
-        channel = self.channel
-        enable_stream = not self._disable_stream and channel.is_rtsp_enabled
-        # SRTP disabled because go2rtc does not support it
-        # https://github.com/AlexxIT/go2rtc/#source-rtsp
-        rtsp_url = channel.rtsps_no_srtp_url if self._secure else channel.rtsp_url
-        source = rtsp_url if enable_stream else None
+        if self.data.use_public_api_streams:
+            source = self._async_public_stream_source()
+        else:
+            channel = self.channel
+            enable_stream = not self._disable_stream and channel.is_rtsp_enabled
+            # SRTP disabled because go2rtc does not support it
+            # https://github.com/AlexxIT/go2rtc/#source-rtsp
+            rtsp_url = channel.rtsps_no_srtp_url if self._secure else channel.rtsp_url
+            source = rtsp_url if enable_stream else None
         self._attr_supported_features = _ENABLE_FEATURE if source else _DISABLE_FEATURE
         self._stream_source = source
+
+    @callback
+    def _async_public_stream_source(self) -> str | None:
+        """Return the public-API RTSPS stream URL (SRTP stripped for go2rtc)."""
+        if self._disable_stream or self.channel.is_package or self._quality is None:
+            return None
+        streams = self.data.rtsps_streams.get(self.device.id)
+        if streams is None:
+            return None
+        return streams.get_stream_url(self._quality, srtp=False)
 
     @callback
     def _async_update_device_from_protect(self, device: ProtectDeviceType) -> None:

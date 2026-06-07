@@ -31,6 +31,7 @@ from homeassistant.components.unifiprotect.const import (
     ATTR_FPS,
     ATTR_HEIGHT,
     ATTR_WIDTH,
+    CONF_USE_PUBLIC_API_STREAMS,
     DEFAULT_ATTRIBUTION,
     DOMAIN,
 )
@@ -61,6 +62,15 @@ from .utils import (
     remove_entities,
     time_changed,
 )
+
+
+@pytest.fixture(name="ufp_options")
+def _private_stream_options() -> dict[str, bool]:
+    """Pin this module to the legacy private RTSP stream path.
+
+    The public stream path is covered by ``test_camera_public.py``.
+    """
+    return {CONF_USE_PUBLIC_API_STREAMS: False}
 
 
 class MockWebRTCProvider(CameraWebRTCProvider):
