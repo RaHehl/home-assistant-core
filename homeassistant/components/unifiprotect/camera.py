@@ -127,9 +127,11 @@ def _async_public_camera_entities(
 ) -> list[ProtectDeviceEntity]:
     """Create camera entities with stream URLs sourced from the public API.
 
-    One secure entity per hardware stream quality (high/medium/low, plus the
-    package camera). RTSPS URLs come from the public API with SRTP stripped for
-    go2rtc; the private per-channel RTSP repair does not apply in this mode.
+    Mirrors the private path's "expose only working channels" model: one secure
+    entity per *active* RTSPS quality (the first is enabled by default), plus the
+    package camera. When no quality is active the high channel is still created
+    so snapshots work, and a repair offers to activate its stream. RTSPS URLs
+    come from the public API with SRTP stripped for go2rtc.
     """
     disable_stream = data.disable_stream
     entities: list[ProtectDeviceEntity] = []
@@ -149,25 +151,39 @@ def _async_public_camera_entities(
         # Public mode supersedes the private per-channel RTSP repair.
         ir.async_delete_issue(hass, DOMAIN, f"rtsp_disabled_{camera.id}")
         streams = data.rtsps_streams.get(camera.id)
-        default_active = bool(streams and streams.get_stream_url("high"))
-        issue_id = f"public_stream_disabled_{camera.id}"
-        if default_active or disable_stream or camera.is_third_party_camera:
-            ir.async_delete_issue(hass, DOMAIN, issue_id)
-        else:
-            _create_public_stream_repair(hass, entry, camera)
+        active = set(streams.get_active_stream_qualities()) if streams else set()
 
-        is_default = True
+        has_stream = False
         for channel in camera.channels:
             if channel.is_package:
                 # package camera provides snapshots only; 2 FPS streams buffer
                 entities.append(ProtectCamera(data, camera, channel, True, True, True))
-            else:
+                continue
+            # The first active quality becomes the default (enabled) entity;
+            # inactive qualities are skipped so an enabled entity always streams.
+            if _QUALITY_BY_CHANNEL_ID.get(channel.id) in active:
                 entities.append(
                     ProtectCamera(
-                        data, camera, channel, is_default, True, disable_stream
+                        data, camera, channel, not has_stream, True, disable_stream
                     )
                 )
-                is_default = False
+                has_stream = True
+
+        issue_id = f"public_stream_disabled_{camera.id}"
+        if has_stream:
+            ir.async_delete_issue(hass, DOMAIN, issue_id)
+            continue
+
+        # No active stream: still expose the camera via the high channel so
+        # snapshots work, and raise a repair to activate it — unless RTSP is
+        # globally disabled or the camera is third-party (mirrors private path).
+        entities.append(
+            ProtectCamera(data, camera, camera.channels[0], True, True, disable_stream)
+        )
+        if disable_stream or camera.is_third_party_camera:
+            ir.async_delete_issue(hass, DOMAIN, issue_id)
+        else:
+            _create_public_stream_repair(hass, entry, camera)
     return entities
 
 
@@ -180,6 +196,10 @@ def _async_camera_entities(
     if data.use_public_api_streams:
         return _async_public_camera_entities(hass, entry, data, ufp_device)
 
+    # Legacy private stream path: kept only as a fallback while the private API
+    # still exists. When the private API is removed, drop this branch, the
+    # `use_public_api_streams` option, and the secure/insecure split (the
+    # `{mac}_{id}_insecure` entities), and migrate unique_ids accordingly.
     disable_stream = data.disable_stream
     entities: list[ProtectDeviceEntity] = []
     for camera, channel, is_default in _get_camera_channels(

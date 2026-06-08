@@ -317,9 +317,13 @@ class ProtectData:
         if device.is_adopted_by_us:
             _LOGGER.debug("Device adopted: %s", device.id)
             # Cameras may need async data (PTZ patrols, public RTSPS streams)
-            # loaded before their entities are created on adopt.
-            if isinstance(device, Camera) and (
-                device.feature_flags.is_ptz or self.use_public_api_streams
+            # loaded before their entities are created on adopt. AiPort
+            # subclasses Camera but has no camera entities/streams, so it skips
+            # the async path.
+            if (
+                isinstance(device, Camera)
+                and device.model is not ModelType.AIPORT
+                and (device.feature_flags.is_ptz or self.use_public_api_streams)
             ):
                 self._hass.async_create_task(
                     self._async_adopt_camera(device),
