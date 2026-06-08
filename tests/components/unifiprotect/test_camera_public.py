@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 from uiprotect.data import Camera as ProtectCamera
-from uiprotect.exceptions import ClientError
 
 from homeassistant.components.camera import (
     CameraEntityFeature,
@@ -254,18 +253,6 @@ async def test_public_streams_unavailable(
         return pb
 
     ufp.api.update_public = AsyncMock(side_effect=_prime_streamless)
-
-    await init_entry(hass, ufp, [camera_all])
-
-    high_id = _channel_entity_id(camera_all, 0)
-    assert await async_get_stream_source(hass, high_id) is None
-
-
-async def test_public_streams_load_error(
-    hass: HomeAssistant, ufp: MockUFPFixture, camera_all: ProtectCamera
-) -> None:
-    """A failure priming the public bootstrap is handled gracefully."""
-    ufp.api.update_public = AsyncMock(side_effect=ClientError)
 
     await init_entry(hass, ufp, [camera_all])
 

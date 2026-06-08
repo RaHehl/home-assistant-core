@@ -100,9 +100,12 @@ def mock_nvr():
 
 
 @pytest.fixture(name="ufp_options")
-def mock_ufp_options() -> dict[str, Any]:
+def mock_ufp_options(request: pytest.FixtureRequest) -> dict[str, Any]:
     """Options for the mock config entry (default: public stream path)."""
-    return {}
+    options: dict[str, Any] = {}
+    if hasattr(request, "param"):
+        options.update(request.param)
+    return options
 
 
 @pytest.fixture(name="ufp_config_entry")
@@ -202,6 +205,23 @@ def mock_ufp_client(bootstrap: Bootstrap):
 
     client.get_camera_rtsps_streams = AsyncMock(side_effect=get_camera_rtsps_streams)
     client.create_camera_rtsps_streams = AsyncMock(return_value=None)
+
+    async def update_public() -> Any:
+        # Mirror the library prime: populate PublicCamera.rtsps_streams for every
+        # camera (keyed by id) from the current private bootstrap, so a consumer
+        # reads camera.rtsps_streams synchronously after setup/adopt.
+        pb = client.public_bootstrap
+        pb.cameras = {
+            camera.id: SimpleNamespace(
+                id=camera.id,
+                state=camera.state,
+                rtsps_streams=_public_rtsps_for(camera),
+            )
+            for camera in client.bootstrap.cameras.values()
+        }
+        return pb
+
+    client.update_public = AsyncMock(side_effect=update_public)
     return client
 
 
@@ -238,25 +258,9 @@ def mock_entry(
             ufp.devices_ws_subscription = ws_callback
             return Mock()
 
-        async def update_public() -> Any:
-            # Mirror the library prime: populate PublicCamera.rtsps_streams for
-            # every camera (keyed by id) from the current private bootstrap, so a
-            # consumer reads camera.rtsps_streams synchronously after setup/adopt.
-            pb = ufp_client.public_bootstrap
-            pb.cameras = {
-                camera.id: SimpleNamespace(
-                    id=camera.id,
-                    state=camera.state,
-                    rtsps_streams=_public_rtsps_for(camera),
-                )
-                for camera in ufp_client.bootstrap.cameras.values()
-            }
-            return pb
-
         ufp_client.subscribe_websocket = subscribe
         ufp_client.subscribe_websocket_state = subscribe_websocket_state
         ufp_client.subscribe_devices_websocket = subscribe_devices_websocket
-        ufp_client.update_public = AsyncMock(side_effect=update_public)
         ufp_client.has_public_bootstrap = False
         yield ufp
 
