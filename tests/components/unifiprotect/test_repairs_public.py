@@ -79,6 +79,41 @@ async def test_public_stream_repair_fix(
     ufp.api.create_camera_rtsps_streams.assert_called_with(camera.id, "high")
 
 
+async def test_public_stream_repair_confirm_when_unresolved(
+    hass: HomeAssistant,
+    ufp: MockUFPFixture,
+    camera: Camera,
+    hass_client: ClientSessionGenerator,
+    hass_ws_client: WebSocketGenerator,
+) -> None:
+    """If a stream cannot be created, the flow falls back to a confirm step."""
+    for channel in camera.channels:
+        channel.is_rtsp_enabled = False
+
+    await init_entry(hass, ufp, [camera])
+    await async_process_repairs_platforms(hass)
+    ws_client = await hass_ws_client(hass)
+    client = await hass_client()
+
+    issue_id = f"public_stream_disabled_{camera.id}"
+    await ws_client.send_json({"id": 1, "type": "repairs/list_issues"})
+    msg = await ws_client.receive_json()
+    assert any(i["issue_id"] == issue_id for i in msg["result"]["issues"])
+
+    # Creating a stream does not help (still no active stream).
+    ufp.api.get_camera_rtsps_streams = AsyncMock(return_value=_NO_STREAMS)
+    ufp.api.create_camera_rtsps_streams = AsyncMock(return_value=_NO_STREAMS)
+
+    data = await start_repair_fix_flow(client, DOMAIN, issue_id)
+    assert data["step_id"] == "start"
+
+    data = await process_repair_fix_flow(client, data["flow_id"])
+    assert data["step_id"] == "confirm"
+
+    data = await process_repair_fix_flow(client, data["flow_id"])
+    assert data["type"] == "create_entry"
+
+
 async def test_public_stream_no_repair_if_active(
     hass: HomeAssistant,
     ufp: MockUFPFixture,
