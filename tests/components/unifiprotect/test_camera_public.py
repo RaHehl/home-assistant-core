@@ -1,5 +1,6 @@
 """Test the UniFi Protect camera platform with public-API streams."""
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -39,6 +40,12 @@ def _public_stream_options(request: pytest.FixtureRequest) -> dict[str, Any]:
     if hasattr(request, "param"):
         options.update(request.param)
     return options
+
+
+@pytest.fixture(autouse=True)
+def _primed_public_bootstrap(ufp: MockUFPFixture) -> None:
+    """The public stream path reads streams from a primed public bootstrap."""
+    ufp.api.has_public_bootstrap = True
 
 
 def _channel_entity_id(camera_obj: ProtectCamera, channel_id: int) -> str:
@@ -235,8 +242,18 @@ async def test_public_no_channels(
 async def test_public_streams_unavailable(
     hass: HomeAssistant, ufp: MockUFPFixture, camera_all: ProtectCamera
 ) -> None:
-    """No cached streams (API returned nothing) means no stream source."""
-    ufp.api.get_camera_rtsps_streams = AsyncMock(return_value=None)
+    """A camera the library leaves unprimed (no streams) has no stream source."""
+
+    async def _prime_streamless() -> Any:
+        pb = ufp.api.public_bootstrap
+        pb.cameras = {
+            camera_all.id: SimpleNamespace(
+                id=camera_all.id, state=camera_all.state, rtsps_streams=None
+            )
+        }
+        return pb
+
+    ufp.api.update_public = AsyncMock(side_effect=_prime_streamless)
 
     await init_entry(hass, ufp, [camera_all])
 
@@ -247,8 +264,8 @@ async def test_public_streams_unavailable(
 async def test_public_streams_load_error(
     hass: HomeAssistant, ufp: MockUFPFixture, camera_all: ProtectCamera
 ) -> None:
-    """A failure loading streams is handled gracefully."""
-    ufp.api.get_camera_rtsps_streams = AsyncMock(side_effect=ClientError)
+    """A failure priming the public bootstrap is handled gracefully."""
+    ufp.api.update_public = AsyncMock(side_effect=ClientError)
 
     await init_entry(hass, ufp, [camera_all])
 
