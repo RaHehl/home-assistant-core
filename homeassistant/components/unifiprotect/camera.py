@@ -119,6 +119,7 @@ def _get_camera_channels(
             ir.async_delete_issue(hass, DOMAIN, f"rtsp_disabled_{camera.id}")
 
 
+@callback
 def _async_public_camera_entities(
     hass: HomeAssistant,
     entry: UFPConfigEntry,
@@ -262,10 +263,13 @@ async def async_setup_entry(
 _DISABLE_FEATURE = CameraEntityFeature(0)
 _ENABLE_FEATURE = CameraEntityFeature.STREAM
 
-# Public-API RTSPS quality names keyed by the channel id Protect assigns them.
-# These match the ``RTSPSStreams`` attribute names consumed by ``get_stream_url``.
+# Maps a private channel id to its public-API RTSPS quality name (the keys
+# consumed by ``RTSPSStreams.get_stream_url``). Keyed on channel id on purpose:
+# the camera unique_id is ``{mac}_{channel.id}`` in both the public and private
+# paths, so the use_public_api_streams toggle stays reversible without entity
+# churn. When the private API (and the toggle) are removed, switch to the
+# channel/quality names and migrate unique_ids.
 _QUALITY_BY_CHANNEL_ID = {0: "high", 1: "medium", 2: "low"}
-_PACKAGE_QUALITY = "package"
 
 
 class ProtectCamera(ProtectDeviceEntity, Camera):
@@ -292,11 +296,8 @@ class ProtectCamera(ProtectDeviceEntity, Camera):
         self._secure = secure
         self._disable_stream = disable_stream
         self._last_image: bytes | None = None
-        self._quality = (
-            _PACKAGE_QUALITY
-            if channel.is_package
-            else _QUALITY_BY_CHANNEL_ID.get(channel.id)
-        )
+        # None for the package channel (snapshot only) and any non-standard id
+        self._quality = _QUALITY_BY_CHANNEL_ID.get(channel.id)
         super().__init__(data, camera)
         device = self.device
 

@@ -119,6 +119,21 @@ async def test_public_doorbell_setup(
     assert state.attributes["supported_features"] == CameraEntityFeature(0)
 
 
+@pytest.mark.parametrize("ufp_options", [{}], indirect=True)
+async def test_public_default_for_existing_entries(
+    hass: HomeAssistant, ufp: MockUFPFixture, camera_all: ProtectCamera
+) -> None:
+    """An entry without the option set defaults to the public stream path."""
+    await init_entry(hass, ufp, [camera_all])
+
+    # public path: secure {mac}_{id} entity with a public stream URL, no insecure
+    high_id = _assert_entity(hass, camera_all, 0, enabled=True)
+    assert (
+        await async_get_stream_source(hass, high_id)
+        == camera_all.channels[0].rtsps_no_srtp_url
+    )
+
+
 async def test_public_first_active_is_default(
     hass: HomeAssistant,
     ufp: MockUFPFixture,
