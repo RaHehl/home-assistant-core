@@ -34,6 +34,12 @@ def _public_stream_options() -> dict[str, bool]:
     return {CONF_USE_PUBLIC_API_STREAMS: True}
 
 
+@pytest.fixture(autouse=True)
+def _primed_public_bootstrap(ufp: MockUFPFixture) -> None:
+    """The public stream path reads streams from a primed public bootstrap."""
+    ufp.api.has_public_bootstrap = True
+
+
 async def test_public_stream_repair_fix(
     hass: HomeAssistant,
     ufp: MockUFPFixture,

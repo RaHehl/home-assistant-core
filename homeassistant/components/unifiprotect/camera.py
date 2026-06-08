@@ -151,7 +151,7 @@ def _async_public_camera_entities(
 
         # Public mode supersedes the private per-channel RTSP repair.
         ir.async_delete_issue(hass, DOMAIN, f"rtsp_disabled_{camera.id}")
-        streams = data.rtsps_streams.get(camera.id)
+        streams = data.get_rtsps_streams(camera.id)
         active = set(streams.get_active_stream_qualities()) if streams else set()
 
         has_stream = False
@@ -335,7 +335,7 @@ class ProtectCamera(ProtectDeviceEntity, Camera):
         """Return the public-API RTSPS stream URL (SRTP stripped for go2rtc)."""
         if self._disable_stream or self.channel.is_package or self._quality is None:
             return None
-        streams = self.data.rtsps_streams.get(self.device.id)
+        streams = self.data.get_rtsps_streams(self.device.id)
         if streams is None:
             return None
         return streams.get_stream_url(self._quality, srtp=False)

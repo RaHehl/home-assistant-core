@@ -103,8 +103,6 @@ class ProtectData:
         self.channels_signal = _async_dispatch_id(entry, DISPATCH_CHANNELS)
         # PTZ patrol cache: camera_id -> list of patrols
         self.ptz_patrols: dict[str, list[PTZPatrol]] = {}
-        # Public-API RTSPS stream cache: camera_id -> RTSPSStreams
-        self.rtsps_streams: dict[str, RTSPSStreams] = {}
 
     @property
     def disable_stream(self) -> bool:
@@ -170,33 +168,20 @@ class ProtectData:
                 )
                 self.ptz_patrols[camera.id] = []
 
-    async def async_load_rtsps_streams(self) -> None:
-        """Load public-API RTSPS streams for all cameras."""
-        # No stream URLs are needed when streaming is disabled or the private
-        # path is in use, so the per-camera fetch is skipped entirely.
-        if not self.use_public_api_streams or self.disable_stream:
-            return
-        await asyncio.gather(
-            *(
-                self.async_load_rtsps_streams_for_camera(camera)
-                for camera in self.get_cameras()
-            )
-        )
+    @callback
+    def get_rtsps_streams(self, camera_id: str) -> RTSPSStreams | None:
+        """Return the library-owned public-API RTSPS streams for a camera.
 
-    async def async_load_rtsps_streams_for_camera(self, camera: Camera) -> None:
-        """Load the public-API RTSPS streams for a specific camera."""
-        # A single slow/unreachable camera must not abort setup, so timeouts
-        # are caught alongside ClientError (the library does not wrap them).
-        try:
-            streams = await self.api.get_camera_rtsps_streams(camera.id)
-        except ClientError, TimeoutError:
-            _LOGGER.debug(
-                "Failed to load RTSPS streams for camera %s",
-                camera.display_name,
-            )
-            return
-        if streams is not None:
-            self.rtsps_streams[camera.id] = streams
+        The library primes ``PublicCamera.rtsps_streams`` during
+        ``update_public()`` and keeps it fresh (reconnect refresh + create/delete
+        write-through), so the integration reads it synchronously and stores
+        nothing itself.
+        """
+        api = self.api
+        if not api.has_public_bootstrap:
+            return None
+        camera = api.public_bootstrap.cameras.get(camera_id)
+        return camera.rtsps_streams if camera is not None else None
 
     @callback
     def async_setup(self) -> None:
@@ -343,7 +328,14 @@ class ProtectData:
         """Load async camera data and dispatch the adopt signal."""
         await self.async_load_ptz_patrols_for_camera(camera)
         if self.use_public_api_streams:
-            await self.async_load_rtsps_streams_for_camera(camera)
+            # Refresh the public bootstrap so the newly-adopted camera is present
+            # and the library has primed its RTSPS streams before entities build.
+            try:
+                await self.api.update_public()
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug(
+                    "Public bootstrap refresh failed on camera adopt", exc_info=True
+                )
         async_dispatcher_send(self._hass, self.adopt_signal, camera)
 
     @callback

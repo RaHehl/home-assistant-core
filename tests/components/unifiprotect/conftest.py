@@ -6,6 +6,7 @@ from functools import partial
 from ipaddress import IPv4Address
 from pathlib import Path
 from tempfile import gettempdir
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -48,6 +49,22 @@ from . import _patch_discovery
 from .utils import MockUFPFixture
 
 from tests.common import MockConfigEntry, load_json_object_fixture
+
+
+def _public_rtsps_for(camera: Any) -> RTSPSStreams | None:
+    """Build a camera's primed RTSPS streams from its RTSP-enabled channels.
+
+    Mirrors what the library writes onto ``PublicCamera.rtsps_streams`` during
+    ``update_public()`` — only RTSP-enabled channels carry an active URL, and a
+    camera with none is left streamless (``None``).
+    """
+    urls = {
+        _QUALITY_BY_CHANNEL_ID[channel.id]: channel.rtsps_url
+        for channel in camera.channels
+        if channel.is_rtsp_enabled and channel.id in _QUALITY_BY_CHANNEL_ID
+    }
+    return RTSPSStreams(**urls) if urls else None
+
 
 MAC_ADDR = "aa:bb:cc:dd:ee:ff"
 
@@ -164,21 +181,24 @@ def mock_ufp_client(bootstrap: Bootstrap):
     client.async_disconnect_ws = AsyncMock()
     client.has_public_bootstrap = False
 
+    # The library owns RTSPS streams on ``PublicCamera.rtsps_streams`` and primes
+    # them in ``update_public()``; the integration reads ``camera.rtsps_streams``
+    # synchronously. Expose empty device collections so ``has_public_bootstrap``-
+    # gated entity setup is a no-op unless a test populates them; the camera
+    # priming is simulated by the ``update_public`` side effect (see ``mock_entry``).
+    client.public_bootstrap = Mock()
+    client.public_bootstrap.cameras = {}
+    client.public_bootstrap.relays = {}
+    client.public_bootstrap.sirens = {}
+    client.public_bootstrap.arm_profiles = {}
+    client.public_bootstrap.arm_mode = None
+
     async def get_camera_rtsps_streams(
         camera_id: str, *args: Any, **kwargs: Any
     ) -> RTSPSStreams | None:
-        """Build public-API RTSPS streams from the camera's RTSP-enabled channels."""
+        """Fetch a camera's RTSPS streams (flag-free primitive; used by repairs)."""
         camera = client.bootstrap.cameras.get(camera_id)
-        if camera is None:
-            return None
-        # Mirror the real device: only RTSP-enabled channels have an active URL.
-        # Use the private rtsps_url so stripping SRTP yields rtsps_no_srtp_url.
-        urls = {
-            _QUALITY_BY_CHANNEL_ID[channel.id]: channel.rtsps_url
-            for channel in camera.channels
-            if channel.is_rtsp_enabled and channel.id in _QUALITY_BY_CHANNEL_ID
-        }
-        return RTSPSStreams(**urls)
+        return _public_rtsps_for(camera) if camera is not None else None
 
     client.get_camera_rtsps_streams = AsyncMock(side_effect=get_camera_rtsps_streams)
     client.create_camera_rtsps_streams = AsyncMock(return_value=None)
@@ -218,10 +238,25 @@ def mock_entry(
             ufp.devices_ws_subscription = ws_callback
             return Mock()
 
+        async def update_public() -> Any:
+            # Mirror the library prime: populate PublicCamera.rtsps_streams for
+            # every camera (keyed by id) from the current private bootstrap, so a
+            # consumer reads camera.rtsps_streams synchronously after setup/adopt.
+            pb = ufp_client.public_bootstrap
+            pb.cameras = {
+                camera.id: SimpleNamespace(
+                    id=camera.id,
+                    state=camera.state,
+                    rtsps_streams=_public_rtsps_for(camera),
+                )
+                for camera in ufp_client.bootstrap.cameras.values()
+            }
+            return pb
+
         ufp_client.subscribe_websocket = subscribe
         ufp_client.subscribe_websocket_state = subscribe_websocket_state
         ufp_client.subscribe_devices_websocket = subscribe_devices_websocket
-        ufp_client.update_public = AsyncMock()
+        ufp_client.update_public = AsyncMock(side_effect=update_public)
         ufp_client.has_public_bootstrap = False
         yield ufp
 

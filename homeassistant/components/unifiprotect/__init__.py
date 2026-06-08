@@ -169,9 +169,6 @@ async def _async_setup_entry(
     # Load PTZ patrol data before loading platforms
     await data_service.async_load_ptz_patrols()
 
-    # Load public-API RTSPS streams before loading platforms (public stream mode)
-    await data_service.async_load_rtsps_streams()
-
     # Create the NVR device before loading platforms
     # This ensures via_device references work for all device entities
     nvr = bootstrap.nvr
