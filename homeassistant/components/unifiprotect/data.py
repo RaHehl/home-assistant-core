@@ -172,7 +172,9 @@ class ProtectData:
 
     async def async_load_rtsps_streams(self) -> None:
         """Load public-API RTSPS streams for all cameras."""
-        if not self.use_public_api_streams:
+        # No stream URLs are needed when streaming is disabled or the private
+        # path is in use, so the per-camera fetch is skipped entirely.
+        if not self.use_public_api_streams or self.disable_stream:
             return
         await asyncio.gather(
             *(
@@ -183,9 +185,11 @@ class ProtectData:
 
     async def async_load_rtsps_streams_for_camera(self, camera: Camera) -> None:
         """Load the public-API RTSPS streams for a specific camera."""
+        # A single slow/unreachable camera must not abort setup, so timeouts
+        # are caught alongside ClientError (the library does not wrap them).
         try:
             streams = await self.api.get_camera_rtsps_streams(camera.id)
-        except ClientError:
+        except ClientError, TimeoutError:
             _LOGGER.debug(
                 "Failed to load RTSPS streams for camera %s",
                 camera.display_name,

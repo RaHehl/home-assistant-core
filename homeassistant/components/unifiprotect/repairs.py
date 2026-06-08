@@ -4,6 +4,7 @@ from typing import cast
 
 from uiprotect import ProtectApiClient
 from uiprotect.data import Bootstrap, Camera
+from uiprotect.exceptions import ClientError
 import voluptuous as vol
 
 from homeassistant.components.repairs import (
@@ -199,10 +200,17 @@ class PublicStreamRepair(_CameraRepair):
                 description_placeholders=placeholders,
             )
 
-        if not await self._has_active_stream():
-            await self._api.create_camera_rtsps_streams(self._camera_id, "high")
+        # Creating a stream needs write permission; a NotAuthorized/ClientError
+        # routes to the confirm step (which explains the manual fallback)
+        # instead of raising out of the fix flow.
+        try:
+            if not await self._has_active_stream():
+                await self._api.create_camera_rtsps_streams(self._camera_id, "high")
+            active = await self._has_active_stream()
+        except ClientError:
+            active = False
 
-        if await self._has_active_stream():
+        if active:
             await self.hass.config_entries.async_reload(self._entry.entry_id)
             return self.async_create_entry(data={})
         return await self.async_step_confirm()
