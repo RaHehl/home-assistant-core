@@ -15,11 +15,12 @@ from homeassistant.components.camera import (
 from homeassistant.components.unifiprotect.const import (
     CONF_DISABLE_RTSP,
     CONF_USE_PUBLIC_API_STREAMS,
+    DOMAIN,
 )
 from homeassistant.components.unifiprotect.utils import get_camera_base_name
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import entity_registry as er, issue_registry as ir
 
 from .utils import (
     MockUFPFixture,
@@ -101,8 +102,8 @@ async def test_public_doorbell_setup(
     """Doorbell adds a package entity (snapshot only) enabled by default."""
     await init_entry(hass, ufp, [doorbell])
 
-    # high + package enabled, medium + low disabled
-    assert_entity_counts(hass, Platform.CAMERA, 4, 2)
+    # only the active high quality + the package camera (mirrors private path)
+    assert_entity_counts(hass, Platform.CAMERA, 2, 2)
 
     high_id = _assert_entity(hass, doorbell, 0, enabled=True)
     assert (
@@ -116,6 +117,40 @@ async def test_public_doorbell_setup(
     state = hass.states.get(package_id)
     assert state
     assert state.attributes["supported_features"] == CameraEntityFeature(0)
+
+
+async def test_public_first_active_is_default(
+    hass: HomeAssistant,
+    ufp: MockUFPFixture,
+    camera_all: ProtectCamera,
+    issue_registry: ir.IssueRegistry,
+) -> None:
+    """The first active quality is the default; inactive ones get no entity."""
+    camera_all.channels = [c.model_copy() for c in camera_all.channels]
+    camera_all.channels[0].is_rtsp_enabled = False  # high inactive
+    camera_all.channels[1].is_rtsp_enabled = True  # medium active
+    camera_all.channels[2].is_rtsp_enabled = False  # low inactive
+
+    await init_entry(hass, ufp, [camera_all])
+
+    # only medium exists, enabled by default, with a working stream
+    assert_entity_counts(hass, Platform.CAMERA, 1, 1)
+    medium_id = _assert_entity(hass, camera_all, 1, enabled=True)
+    assert (
+        await async_get_stream_source(hass, medium_id)
+        == camera_all.channels[1].rtsps_no_srtp_url
+    )
+
+    # inactive high/low get no entity, and no repair is raised (a quality streams)
+    entity_registry = er.async_get(hass)
+    assert entity_registry.async_get(_channel_entity_id(camera_all, 0)) is None
+    assert entity_registry.async_get(_channel_entity_id(camera_all, 2)) is None
+    assert (
+        issue_registry.async_get_issue(
+            DOMAIN, f"public_stream_disabled_{camera_all.id}"
+        )
+        is None
+    )
 
 
 async def test_public_no_active_stream(
@@ -151,7 +186,7 @@ async def test_public_camera_image(
 ) -> None:
     """Main snapshot is fetched from the public API."""
     await init_entry(hass, ufp, [camera])
-    assert_entity_counts(hass, Platform.CAMERA, 3, 1)
+    assert_entity_counts(hass, Platform.CAMERA, 1, 1)
 
     ufp.api.get_public_api_camera_snapshot = AsyncMock()
     await async_get_image(hass, _channel_entity_id(camera, 0))
@@ -164,7 +199,7 @@ async def test_public_package_camera_image(
 ) -> None:
     """Package snapshot is fetched from the public API with package=True."""
     await init_entry(hass, ufp, [doorbell])
-    assert_entity_counts(hass, Platform.CAMERA, 4, 2)
+    assert_entity_counts(hass, Platform.CAMERA, 2, 2)
 
     ufp.api.get_public_api_camera_snapshot = AsyncMock()
     await async_get_image(hass, _channel_entity_id(doorbell, 3))
