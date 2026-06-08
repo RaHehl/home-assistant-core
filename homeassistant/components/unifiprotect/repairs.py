@@ -171,6 +171,9 @@ class PublicStreamRepair(_CameraRepair):
     """Handler for a missing public-API RTSPS stream."""
 
     async def _has_active_stream(self) -> bool:
+        # The issue is raised only when no quality is active; creating the high
+        # stream clears it. Matches the trigger in camera.py so the repair does
+        # not re-raise after a successful fix.
         streams = await self._api.get_camera_rtsps_streams(self._camera_id)
         return bool(streams and streams.get_active_stream_qualities())
 
