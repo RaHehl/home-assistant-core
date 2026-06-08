@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from uiprotect.data import Camera as ProtectCamera
+from uiprotect.exceptions import ClientError
 
 from homeassistant.components.camera import (
     CameraEntityFeature,
@@ -169,6 +170,40 @@ async def test_public_package_camera_image(
     await async_get_image(hass, _channel_entity_id(doorbell, 3))
     ufp.api.get_public_api_camera_snapshot.assert_called_once()
     assert ufp.api.get_public_api_camera_snapshot.call_args.kwargs["package"] is True
+
+
+async def test_public_no_channels(
+    hass: HomeAssistant, ufp: MockUFPFixture, camera: ProtectCamera
+) -> None:
+    """A camera without channels yet creates no entities."""
+    camera.channels = []
+
+    await init_entry(hass, ufp, [camera])
+    assert_entity_counts(hass, Platform.CAMERA, 0, 0)
+
+
+async def test_public_streams_unavailable(
+    hass: HomeAssistant, ufp: MockUFPFixture, camera_all: ProtectCamera
+) -> None:
+    """No cached streams (API returned nothing) means no stream source."""
+    ufp.api.get_camera_rtsps_streams = AsyncMock(return_value=None)
+
+    await init_entry(hass, ufp, [camera_all])
+
+    high_id = _channel_entity_id(camera_all, 0)
+    assert await async_get_stream_source(hass, high_id) is None
+
+
+async def test_public_streams_load_error(
+    hass: HomeAssistant, ufp: MockUFPFixture, camera_all: ProtectCamera
+) -> None:
+    """A failure loading streams is handled gracefully."""
+    ufp.api.get_camera_rtsps_streams = AsyncMock(side_effect=ClientError)
+
+    await init_entry(hass, ufp, [camera_all])
+
+    high_id = _channel_entity_id(camera_all, 0)
+    assert await async_get_stream_source(hass, high_id) is None
 
 
 async def test_public_adopt(
