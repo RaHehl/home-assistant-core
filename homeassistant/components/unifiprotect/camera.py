@@ -60,6 +60,24 @@ def _create_rtsp_repair(
 
 
 @callback
+def _create_public_stream_repair(
+    hass: HomeAssistant, entry: UFPConfigEntry, camera: UFPCamera
+) -> None:
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        f"public_stream_disabled_{camera.id}",
+        is_fixable=True,
+        is_persistent=False,
+        learn_more_url="https://www.home-assistant.io/integrations/unifiprotect/#camera-streams",
+        severity=IssueSeverity.WARNING,
+        translation_key="public_stream_disabled",
+        translation_placeholders={"camera": camera.display_name},
+        data={"entry_id": entry.entry_id, "camera_id": camera.id},
+    )
+
+
+@callback
 def _get_camera_channels(
     hass: HomeAssistant,
     entry: UFPConfigEntry,
@@ -128,7 +146,16 @@ def _async_public_camera_entities(
             data.async_add_pending_camera_id(camera.id)
             continue
 
+        # Public mode supersedes the private per-channel RTSP repair.
         ir.async_delete_issue(hass, DOMAIN, f"rtsp_disabled_{camera.id}")
+        streams = data.rtsps_streams.get(camera.id)
+        default_active = bool(streams and streams.get_stream_url("high"))
+        issue_id = f"public_stream_disabled_{camera.id}"
+        if default_active or disable_stream or camera.is_third_party_camera:
+            ir.async_delete_issue(hass, DOMAIN, issue_id)
+        else:
+            _create_public_stream_repair(hass, entry, camera)
+
         is_default = True
         for channel in camera.channels:
             if channel.is_package:
