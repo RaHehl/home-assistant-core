@@ -102,7 +102,7 @@ def mock_nvr():
 
 @pytest.fixture(name="ufp_options")
 def mock_ufp_options(request: pytest.FixtureRequest) -> dict[str, Any]:
-    """Options for the mock config entry (default: public stream path)."""
+    """Options for the mock config entry (default: no stream option set, i.e. private path)."""
     options: dict[str, Any] = {}
     if hasattr(request, "param"):
         options.update(request.param)
