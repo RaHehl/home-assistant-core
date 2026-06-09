@@ -1,13 +1,14 @@
 """Config Flow to configure UniFi Protect Integration."""
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 import logging
 from pathlib import Path
 from typing import Any
 
 from aiohttp import CookieJar
 from uiprotect import ProtectApiClient
-from uiprotect.data import NVR
+from uiprotect.data import NVR, Version
 from uiprotect.exceptions import ClientError, NotAuthorized
 from unifi_discovery import async_console_is_alive
 import voluptuous as vol
@@ -59,9 +60,31 @@ from .utils import (
     _async_short_mac,
     _async_unifi_mac_from_hass,
     async_create_api_client,
+    async_resolve_nvr_mac,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+@dataclass
+class NvrSetupData:
+    """Minimal NVR data resolved by the config flow.
+
+    Both the private (full) and public-API-only paths produce this so the flow
+    can set the entry ``unique_id`` (``mac``), title (``display_name``) and gate
+    the minimum Protect version (``version``).
+    """
+
+    mac: str
+    display_name: str
+    version: Version
+
+
+def _is_public_only_input(user_input: dict[str, Any]) -> bool:
+    """Return whether the supplied credentials select public-API-only mode."""
+    return bool(user_input.get(CONF_API_KEY)) and not (
+        user_input.get(CONF_USERNAME) and user_input.get(CONF_PASSWORD)
+    )
 
 
 def _filter_empty_credentials(user_input: dict[str, Any]) -> dict[str, Any]:
@@ -125,6 +148,7 @@ def _build_schema(
     include_host: bool = True,
     include_connection: bool = True,
     credentials_optional: bool = False,
+    allow_public_only: bool = False,
 ) -> vol.Schema:
     """Build a config flow schema.
 
@@ -132,10 +156,16 @@ def _build_schema(
         include_host: Include host field (False when host comes from discovery).
         include_connection: Include port/verify_ssl fields.
         credentials_optional: Credentials optional (True to keep existing values).
+        allow_public_only: Username/password optional with API key required, so a
+            public-API-only entry (API key, no credentials) can be created.
 
     """
     req, opt = vol.Required, vol.Optional
     cred_key = opt if credentials_optional else req
+    # In public-only-capable mode the username/password become optional (so an
+    # API-key-only entry is accepted) while the API key is required.
+    user_key = opt if allow_public_only else req
+    api_key_key = req if allow_public_only else cred_key
 
     schema: dict[vol.Marker, selector.Selector] = {}
     if include_host:
@@ -143,15 +173,16 @@ def _build_schema(
     if include_connection:
         schema[req(CONF_PORT, default=DEFAULT_PORT)] = _PORT_SELECTOR
         schema[req(CONF_VERIFY_SSL, default=DEFAULT_VERIFY_SSL)] = _BOOL_SELECTOR
-    schema[req(CONF_USERNAME)] = _TEXT_SELECTOR
-    schema[cred_key(CONF_PASSWORD)] = _PASSWORD_SELECTOR
-    schema[cred_key(CONF_API_KEY)] = _PASSWORD_SELECTOR
+    schema[user_key(CONF_USERNAME)] = _TEXT_SELECTOR
+    schema[(opt if allow_public_only else cred_key)(CONF_PASSWORD)] = _PASSWORD_SELECTOR
+    schema[api_key_key(CONF_API_KEY)] = _PASSWORD_SELECTOR
     return vol.Schema(schema)
 
 
 # Schemas for different flow contexts
-# User flow: all fields required
-CONFIG_SCHEMA = _build_schema()
+# User flow: host/connection required, API key required, credentials optional so
+# an API-key-only (public-API-only) entry can be created.
+CONFIG_SCHEMA = _build_schema(allow_public_only=True)
 # Reconfigure flow: keep existing credentials if not provided
 RECONFIGURE_SCHEMA = _build_schema(credentials_optional=True)
 # Discovery flow: host comes from discovery, user sets port/ssl
@@ -333,7 +364,10 @@ class ProtectFlowHandler(ConfigFlow, domain=DOMAIN):
     async def _async_get_nvr_data(
         self,
         user_input: dict[str, Any],
-    ) -> tuple[NVR | None, dict[str, str]]:
+    ) -> tuple[NvrSetupData | None, dict[str, str]]:
+        if _is_public_only_input(user_input):
+            return await self._async_get_nvr_data_public(user_input)
+
         session = async_create_clientsession(
             self.hass, cookie_jar=CookieJar(unsafe=True)
         )
@@ -357,10 +391,10 @@ class ProtectFlowHandler(ConfigFlow, domain=DOMAIN):
         )
 
         errors = {}
-        nvr_data = None
+        nvr: NVR | None = None
         try:
             bootstrap = await protect.get_bootstrap()
-            nvr_data = bootstrap.nvr
+            nvr = bootstrap.nvr
         except NotAuthorized as ex:
             _LOGGER.debug(ex)
             errors[CONF_PASSWORD] = "invalid_auth"
@@ -368,10 +402,10 @@ class ProtectFlowHandler(ConfigFlow, domain=DOMAIN):
             _LOGGER.error(ex)
             errors["base"] = "cannot_connect"
         else:
-            if nvr_data.version < MIN_REQUIRED_PROTECT_V:
+            if nvr.version < MIN_REQUIRED_PROTECT_V:
                 _LOGGER.debug(
                     OUTDATED_LOG_MESSAGE,
-                    nvr_data.version,
+                    nvr.version,
                     MIN_REQUIRED_PROTECT_V,
                 )
                 errors["base"] = "protect_version"
@@ -381,7 +415,7 @@ class ProtectFlowHandler(ConfigFlow, domain=DOMAIN):
                 errors["base"] = "cloud_user"
 
         # Only validate API key if bootstrap succeeded
-        if nvr_data and not errors:
+        if nvr and not errors:
             try:
                 await protect.get_meta_info()
             except NotAuthorized as ex:
@@ -391,7 +425,68 @@ class ProtectFlowHandler(ConfigFlow, domain=DOMAIN):
                 _LOGGER.error(ex)
                 errors["base"] = "cannot_connect"
 
+        nvr_data = (
+            NvrSetupData(
+                mac=nvr.mac, display_name=nvr.display_name, version=nvr.version
+            )
+            if nvr is not None
+            else None
+        )
         return nvr_data, errors
+
+    async def _async_get_nvr_data_public(
+        self,
+        user_input: dict[str, Any],
+    ) -> tuple[NvrSetupData | None, dict[str, str]]:
+        """Validate a public-API-only (API-key, no credentials) entry.
+
+        The public API exposes no NVR mac, so uiprotect resolves it out-of-band
+        via the UniFi-OS ``/api/system`` endpoint.
+        """
+        public_api_session = async_get_clientsession(self.hass)
+
+        host = user_input[CONF_HOST]
+        port = int(user_input.get(CONF_PORT, DEFAULT_PORT))
+        verify_ssl = user_input.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL)
+
+        protect = ProtectApiClient.public_only(
+            host=host,
+            port=port,
+            api_key=user_input[CONF_API_KEY],
+            verify_ssl=verify_ssl,
+            public_api_session=public_api_session,
+        )
+
+        errors: dict[str, str] = {}
+        try:
+            await protect.update_public()
+            meta_info = await protect.get_meta_info()
+        except NotAuthorized as ex:
+            _LOGGER.debug(ex)
+            errors[CONF_API_KEY] = "invalid_auth"
+            return None, errors
+        except ClientError as ex:
+            _LOGGER.error(ex)
+            errors["base"] = "cannot_connect"
+            return None, errors
+
+        if meta_info.version < MIN_REQUIRED_PROTECT_V:
+            _LOGGER.debug(
+                OUTDATED_LOG_MESSAGE, meta_info.version, MIN_REQUIRED_PROTECT_V
+            )
+            errors["base"] = "protect_version"
+            return None, errors
+
+        if (mac := await async_resolve_nvr_mac(protect)) is None:
+            errors["base"] = "cannot_connect"
+            return None, errors
+
+        public_nvr = protect.public_bootstrap.nvr
+        display_name = (public_nvr.name if public_nvr else None) or f"NVR {mac}"
+        return (
+            NvrSetupData(mac=mac, display_name=display_name, version=meta_info.version),
+            errors,
+        )
 
     async def async_step_reauth(
         self, entry_data: Mapping[str, Any]

@@ -336,6 +336,97 @@ async def test_setup_public_bootstrap_failed_ignored_private_mode(
     assert ufp.entry.state is ConfigEntryState.LOADED
 
 
+async def test_setup_public_only_creates_nvr_no_platforms(
+    hass: HomeAssistant,
+    device_registry: dr.DeviceRegistry,
+    entity_registry: er.EntityRegistry,
+    ufp_public: MockUFPFixture,
+) -> None:
+    """A public-API-only entry sets up, creates the NVR and forwards no platforms."""
+    await hass.config_entries.async_setup(ufp_public.entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert ufp_public.entry.state is ConfigEntryState.LOADED
+    assert ufp_public.api.update_public.called
+    assert not ufp_public.api.update.called
+
+    nvr_device = device_registry.async_get_device(
+        identifiers={(DOMAIN, "A1E00C826924")}
+    )
+    assert nvr_device is not None
+    assert nvr_device.name == "Public NVR"
+
+    # No entity platforms are forwarded in public-API-only mode yet.
+    entities = er.async_entries_for_config_entry(
+        entity_registry, ufp_public.entry.entry_id
+    )
+    assert entities == []
+
+
+async def test_setup_public_only_resolves_unique_id(
+    hass: HomeAssistant, ufp_public: MockUFPFixture
+) -> None:
+    """A public-API-only entry without unique_id resolves it from the console mac."""
+    hass.config_entries.async_update_entry(ufp_public.entry, unique_id=None)
+    ufp_public.api.get_console_mac = AsyncMock(return_value="e4:38:83:32:c9:b1")
+
+    await hass.config_entries.async_setup(ufp_public.entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert ufp_public.entry.state is ConfigEntryState.LOADED
+    assert ufp_public.entry.unique_id == "E4388332C9B1"
+
+
+async def test_setup_public_only_unresolved_mac_retries(
+    hass: HomeAssistant, ufp_public: MockUFPFixture
+) -> None:
+    """A public-only entry with no resolvable NVR mac retries setup."""
+    hass.config_entries.async_update_entry(ufp_public.entry, unique_id=None)
+    ufp_public.api.get_console_mac = AsyncMock(return_value=None)
+
+    await hass.config_entries.async_setup(ufp_public.entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert ufp_public.entry.state is ConfigEntryState.SETUP_RETRY
+
+
+async def test_setup_public_only_too_old(
+    hass: HomeAssistant, ufp_public: MockUFPFixture, old_nvr: NVR
+) -> None:
+    """A public-only entry below the minimum Protect version errors out."""
+    ufp_public.api.get_meta_info.return_value.version = old_nvr.version
+
+    await hass.config_entries.async_setup(ufp_public.entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert ufp_public.entry.state is ConfigEntryState.SETUP_ERROR
+
+
+async def test_setup_public_only_bootstrap_failed_retries(
+    hass: HomeAssistant, ufp_public: MockUFPFixture
+) -> None:
+    """A failed public bootstrap retries setup in public-only mode."""
+    ufp_public.api.update_public = AsyncMock(side_effect=NvrError)
+
+    await hass.config_entries.async_setup(ufp_public.entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert ufp_public.entry.state is ConfigEntryState.SETUP_RETRY
+
+
+async def test_unload_public_only(
+    hass: HomeAssistant, ufp_public: MockUFPFixture
+) -> None:
+    """A public-API-only entry unloads cleanly despite forwarding no platforms."""
+    await hass.config_entries.async_setup(ufp_public.entry.entry_id)
+    await hass.async_block_till_done()
+    assert ufp_public.entry.state is ConfigEntryState.LOADED
+
+    await hass.config_entries.async_unload(ufp_public.entry.entry_id)
+    assert ufp_public.entry.state is ConfigEntryState.NOT_LOADED
+    assert ufp_public.api.async_disconnect_ws.called
+
+
 async def test_setup_failed_auth(hass: HomeAssistant, ufp: MockUFPFixture) -> None:
     """Test setup of unifiprotect entry with unauthorized error after retries."""
 

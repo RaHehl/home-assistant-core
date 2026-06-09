@@ -2,10 +2,11 @@
 
 from datetime import timedelta
 import logging
+from typing import TYPE_CHECKING
 
 from aiohttp.client_exceptions import ServerDisconnectedError
 from uiprotect.api import DEVICE_UPDATE_INTERVAL
-from uiprotect.data import Bootstrap
+from uiprotect.data import Bootstrap, ModelType
 from uiprotect.exceptions import BadRequest, ClientError, NotAuthorized
 
 # Import the test_util.anonymize module from the uiprotect package
@@ -44,6 +45,7 @@ from .utils import (
     _async_unifi_mac_from_hass,
     async_create_api_client,
     async_get_devices,
+    async_resolve_nvr_mac,
 )
 from .views import (
     SnapshotProxyView,
@@ -78,6 +80,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: UFPConfigEntry) -> bool:
     else:
         data_service = ProtectData(hass, protect, SCAN_INTERVAL, entry)
         entry.runtime_data = data_service
+
+    if data_service.is_public_api_only:
+        return await _async_setup_entry_public(hass, entry, data_service)
 
     try:
         await protect.update()
@@ -200,6 +205,76 @@ async def _async_setup_entry(
     hass.http.register_view(SnapshotProxyView(hass))
     hass.http.register_view(VideoProxyView(hass))
     hass.http.register_view(VideoEventProxyView(hass))
+
+
+async def _async_setup_entry_public(
+    hass: HomeAssistant,
+    entry: UFPConfigEntry,
+    data_service: ProtectData,
+) -> bool:
+    """Set up a public-API-only config entry.
+
+    Public-only entries have no private bootstrap, so the private update/migrate/
+    API-key-creation paths are skipped. Only the NVR device is created; no entity
+    platforms are forwarded yet.
+    """
+    protect = data_service.api
+
+    meta_info = await protect.get_meta_info()
+    if meta_info.version < MIN_REQUIRED_PROTECT_V:
+        raise ConfigEntryError(
+            translation_domain=DOMAIN,
+            translation_key="protect_version",
+            translation_placeholders={
+                "current_version": str(meta_info.version),
+                "min_version": str(MIN_REQUIRED_PROTECT_V),
+            },
+        )
+
+    try:
+        await protect.update_public()
+    except Exception as err:
+        raise ConfigEntryNotReady(
+            translation_domain=DOMAIN,
+            translation_key="public_bootstrap_failed",
+        ) from err
+
+    # The public API does not expose the NVR mac, so resolve it out-of-band.
+    if entry.unique_id is None:
+        if (mac := await async_resolve_nvr_mac(protect)) is None:
+            raise ConfigEntryNotReady(
+                translation_domain=DOMAIN,
+                translation_key="public_bootstrap_failed",
+            )
+        hass.config_entries.async_update_entry(entry, unique_id=mac)
+
+    nvr_mac = entry.unique_id
+    if TYPE_CHECKING:
+        assert nvr_mac is not None
+
+    entry.async_on_unload(
+        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, data_service.async_stop)
+    )
+
+    data_service.async_setup()
+
+    public_nvr = protect.public_bootstrap.nvr
+    nvr_name = (public_nvr.name if public_nvr else None) or entry.title
+
+    device_registry = dr.async_get(hass)
+    device_registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        connections={(dr.CONNECTION_NETWORK_MAC, nvr_mac)},
+        identifiers={(DOMAIN, nvr_mac)},
+        manufacturer="Ubiquiti",
+        name=nvr_name,
+        model=ModelType.NVR.value,
+        sw_version=str(meta_info.version),
+        configuration_url=protect.base_url,
+    )
+
+    # No entity platforms are forwarded in public-API-only mode yet.
+    return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: UFPConfigEntry) -> bool:

@@ -20,6 +20,7 @@ from uiprotect.data import (
 from uiprotect.exceptions import ClientError, NotAuthorized
 
 from homeassistant.const import (
+    CONF_API_KEY,
     CONF_HOST,
     CONF_PASSWORD,
     CONF_PORT,
@@ -48,6 +49,31 @@ if TYPE_CHECKING:
 def _async_unifi_mac_from_hass(mac: str) -> str:
     # MAC addresses in UFP are always caps
     return mac.replace(":", "").upper()
+
+
+@callback
+def async_is_public_api_only(entry: UFPConfigEntry) -> bool:
+    """Return whether the entry is configured for public-API-only mode.
+
+    A public-API-only entry carries an API key but no username/password; the
+    private (username/password) API is unavailable for it.
+    """
+    return bool(entry.data.get(CONF_API_KEY)) and not (
+        entry.data.get(CONF_USERNAME) and entry.data.get(CONF_PASSWORD)
+    )
+
+
+async def async_resolve_nvr_mac(protect: ProtectApiClient) -> str | None:
+    """Resolve the NVR mac for a public-only entry.
+
+    The public Protect API does not expose the NVR mac, so uiprotect resolves
+    it out-of-band via the unauthenticated UniFi-OS ``/api/system`` endpoint.
+    Returns the mac formatted the way the integration stores NVR macs
+    (uppercase, no colons) or ``None`` when it cannot be determined.
+    """
+    if (mac := await protect.get_console_mac()) is None:
+        return None
+    return _async_unifi_mac_from_hass(mac)
 
 
 @callback
@@ -112,8 +138,23 @@ def async_create_api_client(
 ) -> ProtectApiClient:
     """Create ProtectApiClient from config entry."""
 
-    session = async_create_clientsession(hass, cookie_jar=CookieJar(unsafe=True))
     public_api_session = async_create_clientsession(hass)
+    if async_is_public_api_only(entry):
+        # Public-API-only entry: no private (username/password) session exists,
+        # so construct a public-only client. It exposes only the public getters,
+        # update_public(), get_meta_info() and the subscribe_* websockets.
+        return ProtectApiClient.public_only(
+            host=entry.data[CONF_HOST],
+            port=entry.data[CONF_PORT],
+            api_key=entry.data[CONF_API_KEY],
+            verify_ssl=entry.data[CONF_VERIFY_SSL],
+            public_api_session=public_api_session,
+            subscribed_models=DEVICES_FOR_SUBSCRIBE,
+            devices_ws_subscribed_models=DEVICES_WS_SUBSCRIBED_MODELS,
+            ignore_unadopted=False,
+        )
+
+    session = async_create_clientsession(hass, cookie_jar=CookieJar(unsafe=True))
     return ProtectApiClient(
         host=entry.data[CONF_HOST],
         port=entry.data[CONF_PORT],

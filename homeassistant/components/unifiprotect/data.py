@@ -110,6 +110,11 @@ class ProtectData:
         return self._entry.options.get(CONF_DISABLE_RTSP, False)  # type: ignore[no-any-return]
 
     @property
+    def is_public_api_only(self) -> bool:
+        """Check if the API client is running in public-API-only mode."""
+        return self.api.is_public_only
+
+    @property
     def use_public_api_streams(self) -> bool:
         """Check if camera streams are sourced from the public API."""
         return self._entry.options.get(  # type: ignore[no-any-return]
@@ -189,19 +194,27 @@ class ProtectData:
         self.last_update_success = True
         self._async_update_change(True, force_update=True)
         api = self.api
+        # The public devices websocket runs in both modes; subscribe to it
+        # unconditionally so that it is active before update_public() primes the
+        # cache (per library docs: subscribe first, then call update_public()).
         self._unsubs = [
-            api.subscribe_websocket_state(self._async_websocket_state_changed),
-            api.subscribe_websocket(self._async_process_ws_message),
-            async_track_time_interval(
-                self._hass, self._async_poll, self._update_interval
-            ),
-            # Subscribe to the public devices websocket unconditionally so that
-            # it is active before update_public() primes the cache.
-            # Per library docs: subscribe first, then call update_public().
             api.subscribe_devices_websocket(
                 self._async_process_public_devices_ws_message
             ),
         ]
+        # The private websocket and the private poll timer drive features that
+        # only exist over the private API; they are unavailable (and would raise
+        # PublicOnlyModeError) in public-API-only mode.
+        if not self.is_public_api_only:
+            self._unsubs.extend(
+                (
+                    api.subscribe_websocket_state(self._async_websocket_state_changed),
+                    api.subscribe_websocket(self._async_process_ws_message),
+                    async_track_time_interval(
+                        self._hass, self._async_poll, self._update_interval
+                    ),
+                )
+            )
 
     @callback
     def _async_process_public_devices_ws_message(
@@ -224,7 +237,10 @@ class ProtectData:
                 self._async_signal_siren_update(cast(Siren, old_obj))
             return
         if new_obj.model is ModelType.NVR:
-            self._async_signal_device_update(self.api.bootstrap.nvr)
+            # The private NVR drives the (private-mode) alarm entity. Public-only
+            # mode has no private NVR and no alarm entity wired yet, so skip it.
+            if not self.is_public_api_only:
+                self._async_signal_device_update(self.api.bootstrap.nvr)
             return
         if new_obj.model is ModelType.RELAY:
             relay = cast(Relay, new_obj)
@@ -423,9 +439,12 @@ class ProtectData:
     @callback
     def _async_process_updates(self) -> None:
         """Process update from the protect data."""
-        self._async_signal_device_update(self.api.bootstrap.nvr)
-        for device in self.get_by_types(DEVICES_THAT_ADOPT):
-            self._async_signal_device_update(device)
+        # The private bootstrap (NVR + adopted devices) only exists when the
+        # private API is available; public-API-only mode has no such bootstrap.
+        if not self.is_public_api_only:
+            self._async_signal_device_update(self.api.bootstrap.nvr)
+            for device in self.get_by_types(DEVICES_THAT_ADOPT):
+                self._async_signal_device_update(device)
         if self.api.has_public_bootstrap:
             for relay in self.api.public_bootstrap.relays.values():
                 if subscriptions := self._relay_subscriptions.get(relay.mac):
