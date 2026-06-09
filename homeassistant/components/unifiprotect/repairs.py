@@ -204,9 +204,10 @@ class PublicStreamRepair(_CameraRepair):
         # routes to the confirm step (which explains the manual fallback)
         # instead of raising out of the fix flow.
         try:
-            if not await self._has_active_stream():
-                await self._api.create_camera_rtsps_streams(self._camera_id, "high")
             active = await self._has_active_stream()
+            if not active:
+                await self._api.create_camera_rtsps_streams(self._camera_id, "high")
+                active = await self._has_active_stream()
         except ClientError:
             active = False
 

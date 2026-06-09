@@ -706,6 +706,9 @@
     "protect_version": {
       "message": "Your UniFi Protect version ({current_version}) is too old. Minimum required: {min_version}"
     },
+    "public_bootstrap_failed": {
+      "message": "Could not load the public API bootstrap for camera streams"
+    },
     "ptz_preset_not_found": {
       "message": "Could not find PTZ preset with name {preset_name} on camera {camera_name}"
     },

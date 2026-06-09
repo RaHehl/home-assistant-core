@@ -172,7 +172,8 @@ async def _async_setup_entry(
         # best-effort, so a private-stream entry still proceeds.
         if data_service.use_public_api_streams:
             raise ConfigEntryNotReady(
-                "Could not load the public API bootstrap for camera streams"
+                translation_domain=DOMAIN,
+                translation_key="public_bootstrap_failed",
             ) from err
         _LOGGER.debug("Public API bootstrap update failed", exc_info=True)
 

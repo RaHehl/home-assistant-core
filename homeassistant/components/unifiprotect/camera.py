@@ -379,6 +379,8 @@ class ProtectCamera(ProtectDeviceEntity, Camera):
         """Return the Camera Image."""
         # Both the main and the package snapshot come from the public API; the
         # package camera is selected with ``package=True`` (``?channel=package``).
+        # width/height are not forwarded (the public snapshot endpoint has no
+        # resize); the camera component scales the returned JPEG itself.
         last_image = await self.device.get_public_api_snapshot(
             package=self.channel.is_package
         )
