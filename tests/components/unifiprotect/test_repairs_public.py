@@ -211,8 +211,6 @@ async def test_public_stream_no_repair_if_globally_disabled(
     await init_entry(hass, ufp, [camera])
 
     assert (
-        issue_registry.async_get_issue(
-            DOMAIN, f"public_stream_disabled_{camera.id}"
-        )
+        issue_registry.async_get_issue(DOMAIN, f"public_stream_disabled_{camera.id}")
         is None
     )
