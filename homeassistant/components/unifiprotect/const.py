@@ -27,6 +27,14 @@ CONF_ALL_UPDATES = "all_updates"
 CONF_OVERRIDE_CHOST = "override_connection_host"
 CONF_MAX_MEDIA = "max_media"
 CONF_ALLOW_EA = "allow_ea_channel"
+CONF_USE_PUBLIC_API_STREAMS = "use_public_api_streams"
+
+# Opt-in for now: the public-API stream path is offered but not the default.
+# Flip to default once the public API can deliver stream state without the
+# per-camera priming + bulk-refresh work-around that currently pressures its rate
+# limit at setup (uilibs/uiprotect#967: stream URLs on the camera payload and/or
+# a WS event on stream-URL changes).
+DEFAULT_USE_PUBLIC_API_STREAMS = False
 
 CONFIG_OPTIONS = [
     CONF_ALL_UPDATES,
