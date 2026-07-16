@@ -2,7 +2,7 @@
 
 from typing import Any, override
 
-from boschshcpy import SHCShutterControl
+from boschshcpy import SHCShutterControl, ShutterControlService
 
 from homeassistant.components.cover import (
     ATTR_POSITION,
@@ -28,7 +28,7 @@ async def async_setup_entry(
     async_add_entities(
         ShutterControlCover(
             device=cover,
-            parent_id=session.information.unique_id,
+            parent_id=session.unique_id,
             entry_id=config_entry.entry_id,
         )
         for cover in session.device_helper.shutter_controls
@@ -40,6 +40,7 @@ class ShutterControlCover(SHCEntity, CoverEntity):
 
     _attr_name = None
     _attr_device_class = CoverDeviceClass.SHUTTER
+    _device: SHCShutterControl
     _attr_supported_features = (
         CoverEntityFeature.OPEN
         | CoverEntityFeature.CLOSE
@@ -68,19 +69,13 @@ class ShutterControlCover(SHCEntity, CoverEntity):
     @override
     def is_opening(self) -> bool:
         """Return if the cover is opening or not."""
-        return (
-            self._device.operation_state
-            == SHCShutterControl.ShutterControlService.State.OPENING
-        )
+        return self._device.operation_state is ShutterControlService.State.OPENING
 
     @property
     @override
     def is_closing(self) -> bool:
         """Return if the cover is closing or not."""
-        return (
-            self._device.operation_state
-            == SHCShutterControl.ShutterControlService.State.CLOSING
-        )
+        return self._device.operation_state is ShutterControlService.State.CLOSING
 
     @override
     def open_cover(self, **kwargs: Any) -> None:

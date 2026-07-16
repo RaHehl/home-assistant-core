@@ -2,7 +2,12 @@
 
 from typing import override
 
-from boschshcpy import SHCBatteryDevice, SHCShutterContact
+from boschshcpy import (
+    BatteryLevelService,
+    SHCBatteryDevice,
+    SHCShutterContact,
+    ShutterContactService,
+)
 from boschshcpy.device import SHCDevice
 
 from homeassistant.components.binary_sensor import (
@@ -27,31 +32,31 @@ async def async_setup_entry(
     entities: list[BinarySensorEntity] = [
         ShutterContactSensor(
             device=binary_sensor,
-            parent_id=session.information.unique_id,
+            parent_id=session.unique_id,
             entry_id=config_entry.entry_id,
         )
         for binary_sensor in (
-            session.device_helper.shutter_contacts
-            + session.device_helper.shutter_contacts2
+            *session.device_helper.shutter_contacts,
+            *session.device_helper.shutter_contacts2,
         )
     ]
 
     entities.extend(
         BatterySensor(
             device=binary_sensor,
-            parent_id=session.information.unique_id,
+            parent_id=session.unique_id,
             entry_id=config_entry.entry_id,
         )
         for binary_sensor in (
-            session.device_helper.motion_detectors
-            + session.device_helper.shutter_contacts
-            + session.device_helper.shutter_contacts2
-            + session.device_helper.smoke_detectors
-            + session.device_helper.thermostats
-            + session.device_helper.twinguards
-            + session.device_helper.universal_switches
-            + session.device_helper.wallthermostats
-            + session.device_helper.water_leakage_detectors
+            *session.device_helper.motion_detectors,
+            *session.device_helper.shutter_contacts,
+            *session.device_helper.shutter_contacts2,
+            *session.device_helper.smoke_detectors,
+            *session.device_helper.thermostats,
+            *session.device_helper.twinguards,
+            *session.device_helper.universal_switches,
+            *session.device_helper.wallthermostats,
+            *session.device_helper.water_leakage_detectors,
         )
     )
 
@@ -62,11 +67,12 @@ class ShutterContactSensor(SHCEntity, BinarySensorEntity):
     """Representation of an SHC shutter contact sensor."""
 
     _attr_name = None
+    _device: SHCShutterContact
 
     def __init__(self, device: SHCDevice, parent_id: str, entry_id: str) -> None:
-        """Initialize an SHC shutter contact sensor.."""
+        """Initialize an SHC shutter contact sensor."""
         super().__init__(device, parent_id, entry_id)
-        switcher = {
+        switcher: dict[str | None, BinarySensorDeviceClass] = {
             "ENTRANCE_DOOR": BinarySensorDeviceClass.DOOR,
             "REGULAR_WINDOW": BinarySensorDeviceClass.WINDOW,
             "FRENCH_WINDOW": BinarySensorDeviceClass.DOOR,
@@ -80,13 +86,14 @@ class ShutterContactSensor(SHCEntity, BinarySensorEntity):
     @override
     def is_on(self) -> bool:
         """Return the state of the sensor."""
-        return self._device.state == SHCShutterContact.ShutterContactService.State.OPEN
+        return self._device.state is ShutterContactService.State.OPEN
 
 
 class BatterySensor(SHCEntity, BinarySensorEntity):
     """Representation of an SHC battery reporting sensor."""
 
     _attr_device_class = BinarySensorDeviceClass.BATTERY
+    _device: SHCBatteryDevice
 
     def __init__(self, device: SHCDevice, parent_id: str, entry_id: str) -> None:
         """Initialize an SHC battery reporting sensor."""
@@ -97,6 +104,4 @@ class BatterySensor(SHCEntity, BinarySensorEntity):
     @override
     def is_on(self) -> bool:
         """Return the state of the sensor."""
-        return (
-            self._device.batterylevel != SHCBatteryDevice.BatteryLevelService.State.OK
-        )
+        return self._device.batterylevel is not BatteryLevelService.State.OK

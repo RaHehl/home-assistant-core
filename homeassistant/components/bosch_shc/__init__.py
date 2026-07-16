@@ -55,8 +55,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: BoschConfigEntry) -> boo
     device_registry = dr.async_get(hass)
     device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,
-        connections={(dr.CONNECTION_NETWORK_MAC, shc_info.unique_id)},
-        identifiers={(DOMAIN, shc_info.unique_id)},
+        connections={(dr.CONNECTION_NETWORK_MAC, session.unique_id)},
+        identifiers={(DOMAIN, session.unique_id)},
         manufacturer="Bosch",
         name=entry.title,
         model="SmartHomeController",

@@ -63,6 +63,8 @@ class SHCBaseEntity(Entity):
 class SHCEntity(SHCBaseEntity):
     """Representation of a SHC device entity."""
 
+    _device: SHCDevice
+
     def __init__(self, device: SHCDevice, parent_id: str, entry_id: str) -> None:
         """Initialize generic SHC device."""
         self._attr_unique_id = device.serial
@@ -102,6 +104,8 @@ class SHCEntity(SHCBaseEntity):
 
 class SHCDomainEntity(SHCBaseEntity):
     """Representation of a SHC domain service entity."""
+
+    _device: SHCIntrusionSystem
 
     def __init__(
         self, domain: SHCIntrusionSystem, parent_id: str, entry_id: str
