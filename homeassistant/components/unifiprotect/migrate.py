@@ -192,7 +192,6 @@ def async_remove_hdr_switch(hass: HomeAssistant, entry: UFPConfigEntry) -> None:
 
     Added in 2026.11.0
     """
-    # Drop the stored record of the old deprecation repair.
     ir.async_delete_issue(hass, DOMAIN, "deprecate_hdr_switch")
     registry = er.async_get(hass)
     for entity in er.async_entries_for_config_entry(registry, entry.entry_id):
