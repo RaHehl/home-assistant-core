@@ -411,7 +411,7 @@ class SandboxProcess:
         if self._zygote is not None:
             try:
                 return await self._zygote.fork(
-                    command, timeout=self._config.ready_timeout
+                    self.group, command, timeout=self._config.ready_timeout
                 )
             except OSError, TimeoutError, ZygoteError:
                 _LOGGER.exception(
@@ -567,6 +567,9 @@ class SandboxManager:
         if zygote and transport != TRANSPORT_UNIX:
             # Forked workers have no pipes to Core, only the socket they dial.
             raise ValueError("the sandbox zygote requires the unix transport")
+        if zygote and sys.platform != "linux":
+            # Needs pidfds, and fork is unsafe with macOS system frameworks.
+            raise ValueError("the sandbox zygote is only supported on Linux")
         self._transport = transport
         self._zygote = ZygoteClient() if zygote else None
         self._sandboxes: dict[str, SandboxProcess] = {}

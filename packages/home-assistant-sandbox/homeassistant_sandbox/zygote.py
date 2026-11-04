@@ -3,8 +3,9 @@
 Protocol, one JSON object per line:
 
 Core -> zygote (stdin):
-    {"op": "fork", "argv": [...]}              argv for ``__main__.main``
-    {"op": "signal", "pid": 123, "signal": 15}
+    {"op": "fork", "name": "custom", "argv": [...], "log": "/path/fifo"}
+        argv for ``__main__.main``; the worker's stdout and stderr go to
+        the FIFO Core reads, so its output is logged per group.
 
 Zygote -> Core (stdout):
     {"op": "ready", "pid": 100}
@@ -12,7 +13,8 @@ Zygote -> Core (stdout):
     {"op": "error", "error": "..."}            fork failed, in request order
     {"op": "exit", "pid": 123, "code": 0}      negative code = killed by signal
 
-Closing stdin stops the zygote and terminates its workers.
+Core signals workers through pidfds. Closing stdin stops the zygote and
+terminates its workers. Linux only.
 """
 
 import argparse
@@ -21,9 +23,11 @@ import gc
 import importlib
 import json
 import os
+from pathlib import Path
 import selectors
 import signal
 import sys
+import threading
 import time
 import traceback
 from typing import Any
@@ -80,24 +84,28 @@ class Zygote:
 
     def _handle(self, request: dict[str, Any]) -> None:
         if request["op"] == "fork":
-            self._fork(request["argv"])
-        elif request["op"] == "signal":
-            # Only signal unreaped children, so a recycled pid is never hit.
-            if request["pid"] in self._children:
-                os.kill(request["pid"], request["signal"])
+            self._fork(request["name"], request["argv"], request["log"])
 
-    def _fork(self, argv: list[str]) -> None:
+    def _fork(self, name: str, argv: list[str], log_path: str) -> None:
         try:
-            pid = os.fork()
+            # Core holds the read end open, so this does not block.
+            log_fd = os.open(log_path, os.O_WRONLY)
         except OSError as err:
             self._send({"op": "error", "error": str(err)})
             return
+        try:
+            pid = os.fork()
+        except OSError as err:
+            os.close(log_fd)
+            self._send({"op": "error", "error": str(err)})
+            return
         if pid == 0:
-            self._run_child(argv)
+            self._run_child(name, argv, log_fd)
+        os.close(log_fd)
         self._children.add(pid)
         self._send({"op": "forked", "pid": pid})
 
-    def _run_child(self, argv: list[str]) -> None:
+    def _run_child(self, name: str, argv: list[str], log_fd: int) -> None:
         """Become a sandbox worker. Never returns."""
         code = 1
         try:
@@ -111,8 +119,10 @@ class Zygote:
             devnull = os.open(os.devnull, os.O_RDONLY)
             os.dup2(devnull, 0)
             os.close(devnull)
-            # stdout is the control pipe to Core; send stray prints to the log.
-            os.dup2(2, 1)
+            os.dup2(log_fd, 1)
+            os.dup2(log_fd, 2)
+            os.close(log_fd)
+            _set_process_name(f"sbx-{name}")
             code = worker.main(argv)
         except SystemExit as err:
             code = err.code if isinstance(err.code, int) else 1
@@ -171,6 +181,12 @@ class Zygote:
             os.write(1, json.dumps(message).encode() + b"\n")
 
 
+def _set_process_name(name: str) -> None:
+    """Show ``name`` in ps -o comm and top (kernel limit 15 bytes)."""
+    with contextlib.suppress(OSError):
+        Path("/proc/self/comm").write_bytes(name.encode()[:15])
+
+
 def main(argv: list[str] | None = None) -> int:
     """Preload worker modules, freeze them, then serve fork requests."""
     parser = argparse.ArgumentParser(prog="python -m homeassistant_sandbox.zygote")
@@ -189,6 +205,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     for module in args.preload:
         importlib.import_module(module)
+    if threading.active_count() != 1:
+        raise RuntimeError("preloading started a thread; forking would be unsafe")
+    _set_process_name("sbx-zygote")
     # Move preloaded objects out of the GC's reach so collections in the
     # workers do not touch, and thereby copy, the shared pages.
     gc.collect()

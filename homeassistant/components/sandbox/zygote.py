@@ -3,16 +3,28 @@
 import asyncio
 from collections import deque
 import contextlib
+from dataclasses import dataclass
 import json
 import logging
 import os
+from pathlib import Path
+import shutil
 import signal
 import sys
+import tempfile
 from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
 
-ZYGOTE_COMMAND = [sys.executable, "-m", "homeassistant_sandbox.zygote"]
+# Imported once in the zygote instead of in every worker that needs them.
+# Measured per forked worker running the nam integration (measure_zygote.py):
+PRELOAD = (
+    # Saves 44 MB: pulls in hass_nabucasa, botocore, zeroconf and requests.
+    "homeassistant.helpers.aiohttp_client",
+    # Saves 2.5 MB alone, nothing on top of aiohttp_client; kept for
+    # coordinator integrations that bring their own HTTP stack.
+    "homeassistant.helpers.update_coordinator",
+)
 
 
 class ZygoteError(Exception):
@@ -28,13 +40,13 @@ class ZygoteProcess:
 
     stdin: asyncio.StreamWriter | None = None
     stdout: asyncio.StreamReader | None = None
-    stderr: asyncio.StreamReader | None = None
 
-    def __init__(self, client: ZygoteClient, pid: int) -> None:
+    def __init__(self, pid: int, pidfd: int | None) -> None:
         """Initialise the handle."""
-        self._client = client
         self.pid = pid
         self.returncode: int | None = None
+        self.stderr: asyncio.StreamReader | None = None
+        self._pidfd = pidfd
         self._exited = asyncio.Event()
 
     async def wait(self) -> int:
@@ -44,9 +56,10 @@ class ZygoteProcess:
         return self.returncode
 
     def send_signal(self, sig: int) -> None:
-        """Ask the zygote to signal the worker."""
-        if self.returncode is None:
-            self._client.send({"op": "signal", "pid": self.pid, "signal": sig})
+        """Signal the worker; a pidfd cannot hit a recycled pid."""
+        if self._pidfd is not None:
+            with contextlib.suppress(ProcessLookupError):
+                signal.pidfd_send_signal(self._pidfd, sig)
 
     def terminate(self) -> None:
         """Send SIGTERM."""
@@ -59,19 +72,30 @@ class ZygoteProcess:
     def set_exited(self, code: int) -> None:
         """Record the worker's exit code."""
         self.returncode = code
+        if self._pidfd is not None:
+            os.close(self._pidfd)
+            self._pidfd = None
         self._exited.set()
+
+
+@dataclass
+class _PendingFork:
+    future: asyncio.Future[ZygoteProcess]
+    log_fd: int
 
 
 class ZygoteClient:
     """Starts the zygote on demand and forks workers from it."""
 
-    def __init__(self, command: list[str] | None = None) -> None:
+    def __init__(self, preload: tuple[str, ...] = PRELOAD) -> None:
         """Initialise the client; the zygote starts on the first fork."""
-        self._command = command or ZYGOTE_COMMAND
+        self._command = [sys.executable, "-m", "homeassistant_sandbox.zygote"]
+        for module in preload:
+            self._command += ["--preload", module]
         self._proc: asyncio.subprocess.Process | None = None
         self._tasks: list[asyncio.Task[None]] = []
         self._start_lock = asyncio.Lock()
-        self._pending: deque[asyncio.Future[ZygoteProcess]] = deque()
+        self._pending: deque[_PendingFork] = deque()
         self._children: dict[int, ZygoteProcess] = {}
 
     @property
@@ -80,25 +104,30 @@ class ZygoteClient:
         proc = self._proc
         return proc.pid if proc is not None and proc.returncode is None else None
 
-    async def fork(self, argv: list[str], *, timeout: float) -> ZygoteProcess:
+    async def fork(
+        self, name: str, argv: list[str], *, timeout: float
+    ) -> ZygoteProcess:
         """Fork a worker running ``homeassistant_sandbox.__main__.main(argv)``."""
         async with self._start_lock:
             # Cleared only once the old zygote's reports are settled.
             if self._proc is None:
                 await asyncio.wait_for(self._start(), timeout)
-        future: asyncio.Future[ZygoteProcess] = (
-            asyncio.get_running_loop().create_future()
-        )
-        self._pending.append(future)
-        self.send({"op": "fork", "argv": argv})
-        return await asyncio.wait_for(future, timeout)
-
-    def send(self, message: dict[str, Any]) -> None:
-        """Write one request line to the zygote."""
-        proc = self._proc
-        if proc is None or proc.stdin is None or proc.stdin.is_closing():
-            return
-        proc.stdin.write(json.dumps(message).encode() + b"\n")
+        log_dir = tempfile.mkdtemp(prefix=f"sandbox_{name}_log_")
+        log_path = os.path.join(log_dir, "output")
+        os.mkfifo(log_path, 0o600)
+        log_fd = os.open(log_path, os.O_RDONLY | os.O_NONBLOCK)
+        pending = _PendingFork(asyncio.get_running_loop().create_future(), log_fd)
+        self._pending.append(pending)
+        self._send({"op": "fork", "name": name, "argv": argv, "log": log_path})
+        try:
+            child = await asyncio.wait_for(pending.future, timeout)
+        except BaseException:
+            os.close(log_fd)
+            raise
+        finally:
+            shutil.rmtree(log_dir, ignore_errors=True)
+        child.stderr = await self._open_log(log_fd)
+        return child
 
     async def async_close(self) -> None:
         """Close the zygote's stdin and wait for it to stop its workers."""
@@ -108,6 +137,12 @@ class ZygoteClient:
         for task in self._tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+
+    def _send(self, message: dict[str, Any]) -> None:
+        proc = self._proc
+        if proc is None or proc.stdin is None or proc.stdin.is_closing():
+            return
+        proc.stdin.write(json.dumps(message).encode() + b"\n")
 
     async def _start(self) -> None:
         proc = await asyncio.create_subprocess_exec(
@@ -134,29 +169,38 @@ class ZygoteClient:
             asyncio.create_task(self._drain_stderr(proc), name="sandbox zygote log"),
         ]
 
+    async def _open_log(self, log_fd: int) -> asyncio.StreamReader:
+        """Wrap the worker's output FIFO; EOF comes when the worker exits."""
+        loop = asyncio.get_running_loop()
+        reader = asyncio.StreamReader()
+        await loop.connect_read_pipe(
+            lambda: asyncio.StreamReaderProtocol(reader), os.fdopen(log_fd, "rb")
+        )
+        return reader
+
     async def _read_reports(self, proc: asyncio.subprocess.Process) -> None:
         assert proc.stdout is not None
         try:
             while line := await proc.stdout.readline():
-                self._handle(json.loads(line))
+                self._handle(proc.pid, json.loads(line))
         finally:
             await proc.wait()
             self._on_zygote_exit()
 
-    def _handle(self, report: dict[str, Any]) -> None:
+    def _handle(self, zygote_pid: int, report: dict[str, Any]) -> None:
         if report["op"] == "forked":
-            child = ZygoteProcess(self, report["pid"])
+            child = ZygoteProcess(report["pid"], _open_pidfd(report["pid"], zygote_pid))
             self._children[child.pid] = child
-            future = self._pending.popleft()
-            if not future.done():
-                future.set_result(child)
+            pending = self._pending.popleft()
+            if not pending.future.done():
+                pending.future.set_result(child)
             else:
                 # The caller timed out; never leave the worker unsupervised.
                 child.kill()
         elif report["op"] == "error":
-            future = self._pending.popleft()
-            if not future.done():
-                future.set_exception(ZygoteError(report["error"]))
+            pending = self._pending.popleft()
+            if not pending.future.done():
+                pending.future.set_exception(ZygoteError(report["error"]))
         elif report["op"] == "exit":
             self._children.pop(report["pid"]).set_exited(report["code"])
 
@@ -165,20 +209,36 @@ class ZygoteClient:
         _LOGGER.debug("Sandbox zygote exited")
         self._proc = None
         while self._pending:
-            future = self._pending.popleft()
-            if not future.done():
-                future.set_exception(ZygoteError("zygote exited"))
+            pending = self._pending.popleft()
+            if not pending.future.done():
+                pending.future.set_exception(ZygoteError("zygote exited"))
         for child in self._children.values():
             # Orphans of a killed zygote; kill them so a restart does not
             # leave a second worker for the same group running.
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(child.pid, signal.SIGKILL)
+            child.kill()
             child.set_exited(-signal.SIGKILL)
         self._children.clear()
 
     async def _drain_stderr(self, proc: asyncio.subprocess.Process) -> None:
-        """Log worker and zygote output; forked workers share this pipe."""
         assert proc.stderr is not None
         while line := await proc.stderr.readline():
             if text := line.decode("utf-8", errors="replace").rstrip():
                 _LOGGER.debug("sandbox zygote stderr: %s", text)
+
+
+def _open_pidfd(pid: int, zygote_pid: int) -> int | None:
+    """Return a pidfd for the zygote's child ``pid``, or None if it is gone."""
+    try:
+        pidfd = os.pidfd_open(pid)
+    except ProcessLookupError:
+        return None
+    # The zygote may already have reaped the worker; then ``pid`` could
+    # belong to an unrelated process.
+    try:
+        status = Path(f"/proc/{pid}/status").read_text(encoding="ascii")
+    except FileNotFoundError:
+        status = ""
+    if f"\nPPid:\t{zygote_pid}\n" not in status:
+        os.close(pidfd)
+        return None
+    return pidfd
