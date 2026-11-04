@@ -18,6 +18,7 @@ from homeassistant.core import HomeAssistant
 from .channel import Channel, ChannelClosedError, ChannelRemoteError
 from .codec_protobuf import ProtobufCodec
 from .messages import MSG_READY, MSG_SHUTDOWN
+from .zygote import ZygoteClient, ZygoteError, ZygoteProcess
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ _TRANSPORTS = (TRANSPORT_STDIO, TRANSPORT_UNIX)
 # The reply is a protobuf ``ShutdownResult``; typed loosely to keep the
 # manager free of a proto import.
 ShutdownReplyCallback = Callable[[str, Any], Awaitable[None]]
+type SandboxChild = asyncio.subprocess.Process | ZygoteProcess
 
 
 class SandboxError(Exception):
@@ -79,6 +81,7 @@ class SandboxProcess:
         on_channel_closed: Callable[[str], None] | None = None,
         on_ready: Callable[[str], None] | None = None,
         on_shutdown_reply: ShutdownReplyCallback | None = None,
+        zygote: ZygoteClient | None = None,
     ) -> None:
         """Initialise a supervised sandbox subprocess."""
         self.group = group
@@ -90,8 +93,9 @@ class SandboxProcess:
         self._on_channel_closed = on_channel_closed
         self._on_ready = on_ready
         self._on_shutdown_reply = on_shutdown_reply
+        self._zygote = zygote
         self._state: str = "stopped"
-        self._process: asyncio.subprocess.Process | None = None
+        self._process: SandboxChild | None = None
         self._supervisor: asyncio.Task[None] | None = None
         self._ready: asyncio.Event = asyncio.Event()
         self._stopped: asyncio.Event = asyncio.Event()
@@ -162,7 +166,7 @@ class SandboxProcess:
             return
         await self._wait_ready_or_stopped()
 
-    async def _terminate(self, proc: asyncio.subprocess.Process) -> None:
+    async def _terminate(self, proc: SandboxChild) -> None:
         """SIGTERM a process, escalating to SIGKILL after the grace window."""
         if proc.returncode is not None:
             return
@@ -402,8 +406,18 @@ class SandboxProcess:
                 await server.wait_closed()
             shutil.rmtree(socket_dir, ignore_errors=True)
 
-    async def _spawn(self, command: list[str]) -> asyncio.subprocess.Process | None:
+    async def _spawn(self, command: list[str]) -> SandboxChild | None:
         """Spawn the subprocess, returning ``None`` if it cannot start."""
+        if self._zygote is not None:
+            try:
+                return await self._zygote.fork(
+                    command, timeout=self._config.ready_timeout
+                )
+            except OSError, TimeoutError, ZygoteError:
+                _LOGGER.exception(
+                    "Sandbox %s could not be forked (%s)", self.group, command
+                )
+                return None
         try:
             return await asyncio.create_subprocess_exec(
                 *command,
@@ -419,7 +433,7 @@ class SandboxProcess:
 
     async def _supervise_until_exit(
         self,
-        proc: asyncio.subprocess.Process,
+        proc: SandboxChild,
         channel: Channel,
         *,
         drain_stdout: bool,
@@ -528,10 +542,17 @@ class SandboxManager:
         on_ready: Callable[[str], None] | None = None,
         on_shutdown_reply: ShutdownReplyCallback | None = None,
         transport: str = TRANSPORT_STDIO,
+        zygote: bool = False,
     ) -> None:
-        """Initialise the manager."""
+        """Initialise the manager.
+
+        With ``zygote``, workers are forked from one preloaded process and
+        ``command_factory`` returns the worker's ``main()`` argv instead of
+        a full command line.
+        """
         self._hass = hass
-        self._command_factory = command_factory or self._default_command
+        default_factory = self._default_worker_args if zygote else self._default_command
+        self._command_factory = command_factory or default_factory
         self._config = config or SandboxConfig()
         self._on_failed = on_failed
         self._on_channel_ready = on_channel_ready
@@ -543,7 +564,11 @@ class SandboxManager:
                 f"unknown sandbox transport {transport!r}; expected one of "
                 f"{_TRANSPORTS}"
             )
+        if zygote and transport != TRANSPORT_UNIX:
+            # Forked workers have no pipes to Core, only the socket they dial.
+            raise ValueError("the sandbox zygote requires the unix transport")
         self._transport = transport
+        self._zygote = ZygoteClient() if zygote else None
         self._sandboxes: dict[str, SandboxProcess] = {}
         self._locks: dict[str, asyncio.Lock] = {}
 
@@ -598,6 +623,7 @@ class SandboxManager:
                 on_channel_closed=self._on_channel_closed,
                 on_ready=self._on_ready,
                 on_shutdown_reply=self._on_shutdown_reply,
+                zygote=self._zygote,
             )
             self._sandboxes[group] = process
             await process.start()
@@ -612,12 +638,13 @@ class SandboxManager:
 
     async def async_stop_all(self) -> None:
         """Stop every supervised sandbox in parallel."""
-        if not self._sandboxes:
-            return
-        await asyncio.gather(
-            *(process.stop() for process in self._sandboxes.values()),
-            return_exceptions=True,
-        )
+        if self._sandboxes:
+            await asyncio.gather(
+                *(process.stop() for process in self._sandboxes.values()),
+                return_exceptions=True,
+            )
+        if self._zygote is not None:
+            await self._zygote.async_close()
 
     async def async_graceful_shutdown_all(self, *, timeout: float) -> None:
         """Ask every running sandbox to shut down gracefully."""
@@ -644,11 +671,16 @@ class SandboxManager:
             url,
         ]
 
+    def _default_worker_args(self, group: str, url: str) -> list[str]:
+        """Argv for ``homeassistant_sandbox.__main__.main`` in a forked worker."""
+        return ["--name", group, "--url", url]
+
 
 __all__ = [
     "TRANSPORT_STDIO",
     "TRANSPORT_UNIX",
     "CommandFactory",
+    "SandboxChild",
     "SandboxConfig",
     "SandboxError",
     "SandboxFailedError",
